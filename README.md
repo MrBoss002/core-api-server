@@ -72,6 +72,6 @@ If this project saved you time or helped manage your Telegram channels, consider
 
 [![Developed By](https://img.shields.io/badge/Developed%20By-%40MrBoss002-00C853?style=flat-square&logo=github)](https://github.com/MrBoss002)
 
-**Auto-Caption-V2** • Built with ❤️ for Telegram content creators.
+**Core-Api-Server** • Built with ❤️ for Telegram Mini-Apps & Bot Ecosystems
 
 </div>
