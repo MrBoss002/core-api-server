@@ -10,6 +10,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
+const BOT_TOKEN = process.env.BOT_TOKEN; // Needed for Telegram Channel Force-Sub check
 const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_IDS || '').split(',').map(id => parseInt(id.trim())).filter(Boolean);
 
 let db;
@@ -48,18 +49,33 @@ app.post('/api/potato/user', async (req, res) => {
     const { user, refBy } = req.body;
     if (!user || !user.id) return res.status(400).json({ error: 'Invalid user data' });
 
+    const userId = parseInt(user.id);
     const users = db.collection('potato_users');
-    let userData = await users.findOne({ telegramId: user.id });
+    let userData = await users.findOne({ telegramId: userId });
+
+    const defaultUpgrades = {
+      autobot: { level: 0, cost: 1000 },
+      multitap: { level: 1, cost: 500 },
+      maxenergy: { level: 0, cost: 250 }
+    };
+
+    const now = Date.now();
 
     if (!userData) {
+      const parsedRefBy = refBy ? parseInt(refBy) : null;
+
       userData = {
-        telegramId: user.id,
+        telegramId: userId,
         firstName: user.first_name || 'Player',
         username: user.username || '',
         balance: 0,
         energy: 1000,
         maxEnergy: 1000,
-        referredBy: refBy ? parseInt(refBy) : null,
+        lastEnergyUpdate: now,
+        tapPower: 1,
+        autoBotIncome: 0,
+        upgrades: defaultUpgrades,
+        referredBy: parsedRefBy !== userId ? parsedRefBy : null,
         weeklyReferrals: 0,
         completedTasks: [],
         createdAt: new Date()
@@ -67,9 +83,9 @@ app.post('/api/potato/user', async (req, res) => {
       await users.insertOne(userData);
 
       // Award bonus points and increment weekly referrals for referrer
-      if (refBy && parseInt(refBy) !== user.id) {
+      if (parsedRefBy && parsedRefBy !== userId) {
         await users.updateOne(
-          { telegramId: parseInt(refBy) },
+          { telegramId: parsedRefBy },
           { 
             $inc: { 
               balance: 5000,
@@ -79,13 +95,27 @@ app.post('/api/potato/user', async (req, res) => {
         );
       }
     } else {
+      // Ensure upgrades object structure exists
+      if (!userData.upgrades) userData.upgrades = defaultUpgrades;
+
+      // Calculate offline energy regeneration (1 unit per second up to maxEnergy)
+      const maxEnergy = userData.maxEnergy || 1000;
+      const lastUpdate = userData.lastEnergyUpdate || now;
+      const elapsedSeconds = Math.floor((now - lastUpdate) / 1000);
+      const regeneratedEnergy = Math.min(maxEnergy, (userData.energy !== undefined ? userData.energy : maxEnergy) + elapsedSeconds);
+
+      userData.energy = regeneratedEnergy;
+      userData.lastEnergyUpdate = now;
+
       // Sync latest profile information from Telegram
       await users.updateOne(
-        { telegramId: user.id },
+        { telegramId: userId },
         { 
           $set: { 
             firstName: user.first_name || userData.firstName,
-            username: user.username || userData.username 
+            username: user.username || userData.username,
+            energy: regeneratedEnergy,
+            lastEnergyUpdate: now
           } 
         }
       );
@@ -93,7 +123,7 @@ app.post('/api/potato/user', async (req, res) => {
 
     // Retrieve list of invited friends
     const referredUsers = await users.find(
-      { referredBy: user.id },
+      { referredBy: userId },
       { projection: { firstName: 1, username: 1, createdAt: 1, _id: 0 } }
     ).toArray();
 
@@ -104,7 +134,8 @@ app.post('/api/potato/user', async (req, res) => {
 
     res.status(200).json({
       ...userData,
-      referrals
+      referrals,
+      referralCount: referredUsers.length
     });
   } catch (err) {
     console.error('Error in /api/potato/user:', err);
@@ -112,28 +143,45 @@ app.post('/api/potato/user', async (req, res) => {
   }
 });
 
-// 3. Potato Game: Batch Sync Taps & Task Claims
+// 3. Potato Game: Batch Sync Taps, Task Claims, Upgrades & Energy
 app.post('/api/potato/sync', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
 
-    const { telegramId, taps, claimedTaskId } = req.body;
+    const { telegramId, taps, claimedTaskId, balance, energy, maxEnergy, upgrades, tapPower, autoBotIncome } = req.body;
     if (!telegramId) return res.status(400).json({ error: 'Telegram ID required' });
 
+    const userId = parseInt(telegramId);
     const users = db.collection('potato_users');
+    const updateFields = { lastEnergyUpdate: Date.now() };
+
+    if (balance !== undefined) updateFields.balance = balance;
+    if (energy !== undefined) updateFields.energy = energy;
+    if (maxEnergy !== undefined) updateFields.maxEnergy = maxEnergy;
+    if (upgrades) updateFields.upgrades = upgrades;
+    if (tapPower !== undefined) updateFields.tapPower = tapPower;
+    if (autoBotIncome !== undefined) updateFields.autoBotIncome = autoBotIncome;
 
     if (taps && taps > 0) {
       await users.updateOne(
-        { telegramId: parseInt(telegramId) },
-        { $inc: { balance: taps } }
+        { telegramId: userId },
+        { 
+          $inc: { balance: taps },
+          $set: updateFields
+        }
       );
-    } 
-    
+    } else {
+      await users.updateOne(
+        { telegramId: userId },
+        { $set: updateFields }
+      );
+    }
+
     if (claimedTaskId) {
-      const user = await users.findOne({ telegramId: parseInt(telegramId) });
+      const user = await users.findOne({ telegramId: userId });
       if (user && !user.completedTasks.includes(claimedTaskId)) {
         await users.updateOne(
-          { telegramId: parseInt(telegramId) },
+          { telegramId: userId },
           { 
             $push: { completedTasks: claimedTaskId },
             $inc: { balance: 2500 }
@@ -149,7 +197,27 @@ app.post('/api/potato/sync', async (req, res) => {
   }
 });
 
-// 4. Potato Game: Weekly Leaderboard Endpoint
+// 4. Potato Game: Force-Sub Channel Membership Check
+app.post('/api/potato/check-fsub', async (req, res) => {
+  try {
+    const { telegramId, channelUsername } = req.body;
+    if (!BOT_TOKEN) return res.status(500).json({ error: 'BOT_TOKEN is missing on server.' });
+
+    const tgRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${channelUsername}&user_id=${telegramId}`);
+    const data = await tgRes.json();
+
+    if (data.ok && ['member', 'administrator', 'creator'].includes(data.result.status)) {
+      return res.status(200).json({ joined: true });
+    } else {
+      return res.status(200).json({ joined: false });
+    }
+  } catch (err) {
+    console.error('Error in /api/potato/check-fsub:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. Potato Game: Weekly Leaderboard Endpoint
 app.get('/api/potato/leaderboard', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
@@ -205,7 +273,7 @@ app.get('/api/potato/leaderboard', async (req, res) => {
 
 // --- ADMIN DASHBOARD ROUTES ---
 
-// 5. Admin: Fetch Global Platform Analytics
+// 6. Admin: Fetch Global Platform Analytics
 app.get('/api/admin/stats', authorizeAdmin, async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
@@ -230,7 +298,7 @@ app.get('/api/admin/stats', authorizeAdmin, async (req, res) => {
   }
 });
 
-// 6. Admin: Reset Weekly Referral Leaderboard
+// 7. Admin: Reset Weekly Referral Leaderboard
 app.post('/api/admin/reset-weekly', authorizeAdmin, async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
