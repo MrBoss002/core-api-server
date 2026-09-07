@@ -31,25 +31,7 @@ app.get('/', (req, res) => {
   res.status(200).send('Core API Server is running smoothly! 🚀');
 });
 
-// 2. TEMPORARY: Wipe out all data from the potato_users collection
-app.get('/api/potato/admin-reset-db', async (req, res) => {
-  try {
-    if (!db) return res.status(500).json({ error: 'Database not connected' });
-
-    const users = db.collection('potato_users');
-    const result = await users.deleteMany({});
-
-    res.status(200).json({
-      success: true,
-      message: `Database wiped clean! Deleted ${result.deletedCount} user records.`
-    });
-  } catch (err) {
-    console.error('Error in /api/potato/admin-reset-db:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 3. Potato Game: Initialize / Fetch User Profile & Referral List
+// 2. Potato Game: Initialize / Fetch User Profile & Referral List
 app.post('/api/potato/user', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
@@ -147,7 +129,7 @@ app.post('/api/potato/user', async (req, res) => {
   }
 });
 
-// 4. Potato Game: Batch Sync Taps, Task Claims, Upgrades & Energy
+// 3. Potato Game: Batch Sync Taps, Task Claims, Upgrades & Energy
 app.post('/api/potato/sync', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
@@ -201,7 +183,7 @@ app.post('/api/potato/sync', async (req, res) => {
   }
 });
 
-// 5. Potato Game: Force-Sub Channel Membership Check
+// 4. Potato Game: Force-Sub Channel Membership Check
 app.post('/api/potato/check-fsub', async (req, res) => {
   try {
     const { telegramId, channelUsername } = req.body;
@@ -221,7 +203,7 @@ app.post('/api/potato/check-fsub', async (req, res) => {
   }
 });
 
-// 6. Potato Game: Global Balance Leaderboard Endpoint
+// 5. Potato Game: Global Balance Leaderboard Endpoint
 app.get('/api/potato/leaderboard', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
