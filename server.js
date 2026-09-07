@@ -11,7 +11,6 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const BOT_TOKEN = process.env.BOT_TOKEN; // Needed for Telegram Channel Force-Sub check
-const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_IDS || '').split(',').map(id => parseInt(id.trim())).filter(Boolean);
 
 let db;
 
@@ -27,21 +26,30 @@ if (MONGODB_URI) {
   console.warn('Warning: MONGODB_URI environment variable is missing.');
 }
 
-// Admin Authorization Middleware
-const authorizeAdmin = (req, res, next) => {
-  const adminId = parseInt(req.headers['x-admin-id'] || req.body?.adminId || req.query?.adminId);
-  if (!adminId || !ADMIN_IDS.includes(adminId)) {
-    return res.status(403).json({ error: 'Unauthorized: Admin access required.' });
-  }
-  next();
-};
-
 // 1. Health-Check Endpoint for Cron-Job.org (Keeps Render awake 24/7)
 app.get('/', (req, res) => {
   res.status(200).send('Core API Server is running smoothly! 🚀');
 });
 
-// 2. Potato Game: Initialize / Fetch User Profile & Referral List
+// 2. TEMPORARY: Wipe out all data from the potato_users collection
+app.get('/api/potato/admin-reset-db', async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ error: 'Database not connected' });
+
+    const users = db.collection('potato_users');
+    const result = await users.deleteMany({});
+
+    res.status(200).json({
+      success: true,
+      message: `Database wiped clean! Deleted ${result.deletedCount} user records.`
+    });
+  } catch (err) {
+    console.error('Error in /api/potato/admin-reset-db:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. Potato Game: Initialize / Fetch User Profile & Referral List
 app.post('/api/potato/user', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
@@ -76,21 +84,17 @@ app.post('/api/potato/user', async (req, res) => {
         autoBotIncome: 0,
         upgrades: defaultUpgrades,
         referredBy: parsedRefBy !== userId ? parsedRefBy : null,
-        weeklyReferrals: 0,
         completedTasks: [],
         createdAt: new Date()
       };
       await users.insertOne(userData);
 
-      // Award bonus points and increment weekly referrals for referrer
+      // Award bonus points for referrer
       if (parsedRefBy && parsedRefBy !== userId) {
         await users.updateOne(
           { telegramId: parsedRefBy },
           { 
-            $inc: { 
-              balance: 5000,
-              weeklyReferrals: 1
-            } 
+            $inc: { balance: 5000 } 
           }
         );
       }
@@ -143,7 +147,7 @@ app.post('/api/potato/user', async (req, res) => {
   }
 });
 
-// 3. Potato Game: Batch Sync Taps, Task Claims, Upgrades & Energy
+// 4. Potato Game: Batch Sync Taps, Task Claims, Upgrades & Energy
 app.post('/api/potato/sync', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
@@ -197,7 +201,7 @@ app.post('/api/potato/sync', async (req, res) => {
   }
 });
 
-// 4. Potato Game: Force-Sub Channel Membership Check
+// 5. Potato Game: Force-Sub Channel Membership Check
 app.post('/api/potato/check-fsub', async (req, res) => {
   try {
     const { telegramId, channelUsername } = req.body;
@@ -217,7 +221,7 @@ app.post('/api/potato/check-fsub', async (req, res) => {
   }
 });
 
-// 5. Potato Game: Weekly Leaderboard Endpoint
+// 6. Potato Game: Global Balance Leaderboard Endpoint
 app.get('/api/potato/leaderboard', async (req, res) => {
   try {
     if (!db) return res.status(500).json({ error: 'Database not connected' });
@@ -225,40 +229,32 @@ app.get('/api/potato/leaderboard', async (req, res) => {
     const telegramId = parseInt(req.query.telegramId);
     const users = db.collection('potato_users');
 
-    // Fetch Top 10 by weekly referrals, secondary sort by total balance
+    // Fetch Top 10 by total balance
     const top10Docs = await users
       .find({})
-      .sort({ weeklyReferrals: -1, balance: -1 })
+      .sort({ balance: -1 })
       .limit(10)
-      .project({ telegramId: 1, firstName: 1, username: 1, weeklyReferrals: 1, balance: 1, _id: 0 })
+      .project({ telegramId: 1, firstName: 1, username: 1, balance: 1, _id: 0 })
       .toArray();
 
     const top10 = top10Docs.map(u => ({
       telegramId: u.telegramId,
       first_name: u.firstName,
       username: u.username,
-      weeklyReferrals: u.weeklyReferrals || 0,
       balance: u.balance || 0
     }));
 
     // Calculate position for current user
-    let userRank = { rank: null, weeklyReferrals: 0 };
+    let userRank = { rank: null, balance: 0 };
     if (telegramId) {
       const currentUser = await users.findOne({ telegramId });
       if (currentUser) {
         const higherRankCount = await users.countDocuments({
-          $or: [
-            { weeklyReferrals: { $gt: currentUser.weeklyReferrals || 0 } },
-            { 
-              weeklyReferrals: currentUser.weeklyReferrals || 0, 
-              balance: { $gt: currentUser.balance || 0 } 
-            }
-          ]
+          balance: { $gt: currentUser.balance || 0 }
         });
 
         userRank = {
           rank: higherRankCount + 1,
-          weeklyReferrals: currentUser.weeklyReferrals || 0,
           balance: currentUser.balance || 0
         };
       }
@@ -267,51 +263,6 @@ app.get('/api/potato/leaderboard', async (req, res) => {
     res.status(200).json({ top10, userRank });
   } catch (err) {
     console.error('Error in /api/potato/leaderboard:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// --- ADMIN DASHBOARD ROUTES ---
-
-// 6. Admin: Fetch Global Platform Analytics
-app.get('/api/admin/stats', authorizeAdmin, async (req, res) => {
-  try {
-    if (!db) return res.status(500).json({ error: 'Database not connected' });
-
-    const users = db.collection('potato_users');
-    const totalUsers = await users.countDocuments();
-    
-    const balanceStats = await users.aggregate([
-      { $group: { _id: null, totalBalance: { $sum: '$balance' } } }
-    ]).toArray();
-
-    const activeReferrers = await users.countDocuments({ weeklyReferrals: { $gt: 0 } });
-
-    res.status(200).json({
-      totalUsers,
-      totalBalance: balanceStats[0]?.totalBalance || 0,
-      activeReferrers
-    });
-  } catch (err) {
-    console.error('Error in /api/admin/stats:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 7. Admin: Reset Weekly Referral Leaderboard
-app.post('/api/admin/reset-weekly', authorizeAdmin, async (req, res) => {
-  try {
-    if (!db) return res.status(500).json({ error: 'Database not connected' });
-
-    const users = db.collection('potato_users');
-    const result = await users.updateMany({}, { $set: { weeklyReferrals: 0 } });
-
-    res.status(200).json({ 
-      success: true, 
-      message: `Reset weekly referrals for ${result.modifiedCount} users.` 
-    });
-  } catch (err) {
-    console.error('Error in /api/admin/reset-weekly:', err);
     res.status(500).json({ error: err.message });
   }
 });
