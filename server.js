@@ -43,9 +43,10 @@ app.post('/api/potato/user', async (req, res) => {
     const users = db.collection('potato_users');
     let userData = await users.findOne({ telegramId: userId });
 
+    // Upgrades start at Level 0 for scarcity & progression
     const defaultUpgrades = {
       autobot: { level: 0, cost: 1000 },
-      multitap: { level: 1, cost: 500 },
+      multitap: { level: 0, cost: 500 },
       maxenergy: { level: 0, cost: 250 }
     };
 
@@ -59,8 +60,8 @@ app.post('/api/potato/user', async (req, res) => {
         firstName: user.first_name || 'Player',
         username: user.username || '',
         balance: 0,
-        energy: 1000,
-        maxEnergy: 1000,
+        energy: 50,
+        maxEnergy: 50,
         lastEnergyUpdate: now,
         tapPower: 1,
         autoBotIncome: 0,
@@ -71,12 +72,12 @@ app.post('/api/potato/user', async (req, res) => {
       };
       await users.insertOne(userData);
 
-      // Award bonus points for referrer
+      // Award referral bonus (2,500 potatoes) to referrer
       if (parsedRefBy && parsedRefBy !== userId) {
         await users.updateOne(
           { telegramId: parsedRefBy },
           { 
-            $inc: { balance: 5000 } 
+            $inc: { balance: 2500 } 
           }
         );
       }
@@ -84,11 +85,15 @@ app.post('/api/potato/user', async (req, res) => {
       // Ensure upgrades object structure exists
       if (!userData.upgrades) userData.upgrades = defaultUpgrades;
 
-      // Calculate offline energy regeneration (1 unit per second up to maxEnergy)
-      const maxEnergy = userData.maxEnergy || 1000;
+      // Calculate offline energy regeneration (1 unit per 5 seconds up to maxEnergy)
+      const maxEnergy = userData.maxEnergy || 50;
       const lastUpdate = userData.lastEnergyUpdate || now;
       const elapsedSeconds = Math.floor((now - lastUpdate) / 1000);
-      const regeneratedEnergy = Math.min(maxEnergy, (userData.energy !== undefined ? userData.energy : maxEnergy) + elapsedSeconds);
+      const regeneratedPoints = Math.floor(elapsedSeconds / 5);
+      const regeneratedEnergy = Math.min(
+        maxEnergy, 
+        (userData.energy !== undefined ? userData.energy : maxEnergy) + regeneratedPoints
+      );
 
       userData.energy = regeneratedEnergy;
       userData.lastEnergyUpdate = now;
@@ -169,8 +174,7 @@ app.post('/api/potato/sync', async (req, res) => {
         await users.updateOne(
           { telegramId: userId },
           { 
-            $push: { completedTasks: claimedTaskId },
-            $inc: { balance: 2500 }
+            $push: { completedTasks: claimedTaskId }
           }
         );
       }
