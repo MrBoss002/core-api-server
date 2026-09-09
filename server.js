@@ -41,9 +41,10 @@ app.post('/api/potato/user', async (req, res) => {
 
     const userId = parseInt(user.id);
     const users = db.collection('potato_users');
-    let userData = await users.findOne({ telegramId: userId });
+    let userData = await users.findOne({ 
+      $or: [{ telegramId: userId }, { telegramId: userId.toString() }] 
+    });
 
-    // Upgrades start at Level 0 for scarcity & progression
     const defaultUpgrades = {
       autobot: { level: 0, cost: 1000 },
       multitap: { level: 0, cost: 500 },
@@ -72,20 +73,21 @@ app.post('/api/potato/user', async (req, res) => {
       };
       await users.insertOne(userData);
 
-      // Award referral bonus (2,500 potatoes) to referrer
+      // Award referral bonus (2,500 potatoes) to referrer (checks both String/Number)
       if (parsedRefBy && parsedRefBy !== userId) {
         await users.updateOne(
-          { telegramId: parsedRefBy },
           { 
-            $inc: { balance: 2500 } 
-          }
+            $or: [
+              { telegramId: parsedRefBy },
+              { telegramId: parsedRefBy.toString() }
+            ] 
+          },
+          { $inc: { balance: 2500 } }
         );
       }
     } else {
-      // Ensure upgrades object structure exists
       if (!userData.upgrades) userData.upgrades = defaultUpgrades;
 
-      // Calculate offline energy regeneration (1 unit per 5 seconds up to maxEnergy)
       const maxEnergy = userData.maxEnergy || 50;
       const lastUpdate = userData.lastEnergyUpdate || now;
       const elapsedSeconds = Math.floor((now - lastUpdate) / 1000);
@@ -98,9 +100,8 @@ app.post('/api/potato/user', async (req, res) => {
       userData.energy = regeneratedEnergy;
       userData.lastEnergyUpdate = now;
 
-      // Sync latest profile information from Telegram
       await users.updateOne(
-        { telegramId: userId },
+        { $or: [{ telegramId: userId }, { telegramId: userId.toString() }] },
         { 
           $set: { 
             firstName: user.first_name || userData.firstName,
@@ -112,9 +113,13 @@ app.post('/api/potato/user', async (req, res) => {
       );
     }
 
-    // Retrieve list of invited friends
     const referredUsers = await users.find(
-      { referredBy: userId },
+      { 
+        $or: [
+          { referredBy: userId },
+          { referredBy: userId.toString() }
+        ]
+      },
       { projection: { firstName: 1, username: 1, createdAt: 1, _id: 0 } }
     ).toArray();
 
@@ -154,28 +159,29 @@ app.post('/api/potato/sync', async (req, res) => {
     if (autoBotIncome !== undefined) updateFields.autoBotIncome = autoBotIncome;
 
     if (taps && taps > 0) {
+      const { balance, ...fieldsToSet } = updateFields;
       await users.updateOne(
-        { telegramId: userId },
+        { $or: [{ telegramId: userId }, { telegramId: userId.toString() }] },
         { 
           $inc: { balance: taps },
-          $set: updateFields
+          $set: fieldsToSet
         }
       );
     } else {
       await users.updateOne(
-        { telegramId: userId },
+        { $or: [{ telegramId: userId }, { telegramId: userId.toString() }] },
         { $set: updateFields }
       );
     }
 
     if (claimedTaskId) {
-      const user = await users.findOne({ telegramId: userId });
+      const user = await users.findOne({ 
+        $or: [{ telegramId: userId }, { telegramId: userId.toString() }] 
+      });
       if (user && !user.completedTasks.includes(claimedTaskId)) {
         await users.updateOne(
-          { telegramId: userId },
-          { 
-            $push: { completedTasks: claimedTaskId }
-          }
+          { $or: [{ telegramId: userId }, { telegramId: userId.toString() }] },
+          { $push: { completedTasks: claimedTaskId } }
         );
       }
     }
@@ -215,7 +221,6 @@ app.get('/api/potato/leaderboard', async (req, res) => {
     const telegramId = parseInt(req.query.telegramId);
     const users = db.collection('potato_users');
 
-    // Fetch Top 10 by total balance
     const top10Docs = await users
       .find({})
       .sort({ balance: -1 })
@@ -230,10 +235,11 @@ app.get('/api/potato/leaderboard', async (req, res) => {
       balance: u.balance || 0
     }));
 
-    // Calculate position for current user
     let userRank = { rank: null, balance: 0 };
     if (telegramId) {
-      const currentUser = await users.findOne({ telegramId });
+      const currentUser = await users.findOne({ 
+        $or: [{ telegramId }, { telegramId: telegramId.toString() }] 
+      });
       if (currentUser) {
         const higherRankCount = await users.countDocuments({
           balance: { $gt: currentUser.balance || 0 }
